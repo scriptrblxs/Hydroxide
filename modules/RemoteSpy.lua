@@ -1,52 +1,63 @@
 local RemoteSpy = {}
 local cache = {}
-local limit = 20
-local last = 0
+local limit = 15
+local cooldown = 0.1
+local lastCall = 0
 
-local bad = {
-    ["ControlModule"]=true,
-    ["CameraModule"]=true,
-    ["CharacterSound"]=true,
-    ["ControllerService"]=true
+local protected = {
+    ["ControlModule"] = true,
+    ["CameraModule"] = true,
+    ["CharacterSound"] = true,
+    ["ControllerService"] = true,
+    ["PlayerScripts"] = true,
+    ["CoreGui"] = true
 }
 
-local function safe(v)
-    if type(v)=="userdata" then
-        return ("<%s>"):format(tostring(v):match("%u%a+") or "obj")
-    end
-    return type(v)=="table" and "{}" or type(v)=="function" and "func" or v
+local function atomicSafe(v)
+    return (type(v) == "userdata" and "<ud>") or v
 end
 
-local original
-original = hookmetamethod(game, "__namecall", function(s, ...)
-    if bad[s.ClassName] or bad[s.Name] then
-        return original(s, ...)
+local originalFire, originalInvoke
+
+local function safeHook(self, ...)
+    if protected[self.ClassName] or protected[self.Name] then
+        return originalFire(self, ...)
     end
     
-    local n = getnamecallmethod()
-    if n=="FireServer" or n=="InvokeServer" then
-        local a = {...}
-        local t = {
-            args = {},
-            time = os.time(),
-            method = n
-        }
-        
-        for i=1,math.min(2,#a) do
-            t.args[i] = safe(a[i])
-        end
-        
-        if #cache >= limit then
-            table.remove(cache,1)
-        end
-        
-        table.insert(cache,t)
+    if tick() - lastCall < cooldown then
+        return originalFire(self, ...)
     end
     
-    return original(s, ...)
-end)
+    local args = {...}
+    local entry = {
+        method = "FireServer",
+        args = {atomicSafe(args[1])},
+        time = os.time()
+    }
+    
+    if #cache >= limit then
+        cache = {}
+    end
+    
+    cache[#cache + 1] = entry
+    lastCall = tick()
+    
+    return originalFire(self, ...)
+end
+
+local function install()
+    local event = Instance.new("RemoteEvent")
+    originalFire = hookfunction(event.FireServer, safeHook)
+    
+    local func = Instance.new("RemoteFunction")
+    originalInvoke = hookfunction(func.InvokeServer, function(self, ...)
+        return protected[self.ClassName] and originalInvoke(self, ...)
+    end)
+end
+
+pcall(install)
 
 RemoteSpy.GetLogs = function() return cache end
-RemoteSpy.Clear = function() table.clear(cache) end
+RemoteSpy.Clear = function() cache = {} end
 
 return RemoteSpy
