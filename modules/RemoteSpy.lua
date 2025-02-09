@@ -1,111 +1,80 @@
 local RemoteSpy = {}
-local MAX_LOG_SIZE = 100
-local THROTTLE_TIME = 0.1
-local lastCall = 0
+local MAX_LOG_ENTRIES = 50
+local THROTTLE_DELAY = 0.2
+local lastProcess = 0
+local callQueue = {}
 
- Simplified remote tracking with memory limits
-local remoteLogs = setmetatable({}, {
-    __mode = "k",
-    __index = function(t,k)
-        rawset(t,k,{
-            count = 0,
-            lastArgs = {},
-            lastScript = nil
-        })
-        return rawget(t,k)
+ Simplified log storage with FIFO structure
+local remoteLogs = {}
+local logMeta = {
+    __index = function(t, k)
+        return rawget(t, k) or {count=0, args={}, script="Unknown"}
     end
-})
+}
+setmetatable(remoteLogs, logMeta)
 
- Safe argument serialization
+ Safe value serialization with error handling
 local function safeSerialize(value)
-    local valueType = typeof(value)
-    if valueType == "userdata" then
-        return ("[%s:%s]"):format(valueType, tostring(value):gsub(" ",""))
-    elseif valueType == "table" then
-        return "{...}"
-    elseif valueType == "function" then
-        return "[function]"
-    end
-    return value
-end
-
- Throttled logging system
-local function logRemoteCall(remote, method, args, script)
-    local now = tick()
-    if now - lastCall < THROTTLE_TIME then return end
-    lastCall = now
-
-     Clean arguments
-    local cleanArgs = {}
-    for i = 1, math.min(5, #args) do  Limit to first 5 args
-        cleanArgs[i] = safeSerialize(args[i])
-    end
-
-     Update log entry
-    local entry = remoteLogs[remote]
-    entry.count = entry.count + 1
-    entry.lastArgs = cleanArgs
-    entry.lastScript = script and tostring(script) or "Unknown"
-end
-
- Generic hook wrapper
-local function createSafeHook(original)
-    return function(...)
-        local success, result = pcall(function()
-            local self = ...
-            if self and self ~= game then
-                local method = getnamecallmethod() or "UnknownMethod"
-                local args = {...}
-                table.remove(args, 1)  Remove self from args
-                
-                 Get calling script safely
-                local callingScript
-                pcall(function()
-                    callingScript = getcallingscript()
-                    callingScript = callingScript and callingScript:GetFullName() or "UnknownScript"
-                end)
-
-                logRemoteCall(self, method, args, callingScript)
-            end
-            return original(...)
-        end)
-        
-        return success and result or nil
-    end
-end
-
- Install hooks with fallbacks
-local function installHooks()
-    local remoteTypes = {
-        "RemoteEvent",
-        "RemoteFunction",
-        "UnreliableRemoteEvent"
-    }
-
-    for _, className in pairs(remoteTypes) do
-        local success = pcall(function()
-            local instance = Instance.new(className)
-            local methodName = className == "RemoteFunction" and "InvokeServer" or "FireServer"
-            
-            local original
-            original = hookfunction(instance[methodName], createSafeHook(original))
-        end)
-        
-        if not success then
-            warn("[RemoteSpy] Failed to hook", className)
+    local success, result = pcall(function()
+        local t = typeof(value)
+        if t == "userdata" then
+            return ("<%s:%s>"):format(t, tostring(value):sub(1, 20))
+        elseif t == "table" then
+            return "{...}"
+        elseif t == "function" then
+            return "func"
         end
-    end
-end
-
- Initialize with protection
-local initSuccess = pcall(function()
-    installHooks()
-    game.DescendantAdded:Connect(function(descendant)
-        if descendant:IsA("RemoteEvent") or descendant:IsA("RemoteFunction") then
-            pcall(installHooks)  Safe re-hook attempt
-        end
+        return tostring(value):sub(1, 50)
     end)
-end)
+    return success and result or "[Serialization Error]"
+end
+
+ Batch process queued calls
+local function processQueue()
+    if tick() - lastProcess < THROTTLE_DELAY then return end
+    lastProcess = tick()
+    
+    for remote, data in pairs(callQueue) do
+        remoteLogs[remote] = {
+            count = remoteLogs[remote].count + data.count,
+            args = data.args,
+            script = data.script
+        }
+        callQueue[remote] = nil
+    end
+    
+     Maintain log size
+    while #remoteLogs > MAX_LOG_ENTRIES do
+        table.remove(remoteLogs, 1)
+    end
+end
+
+ Namecall hook for all remote interactions
+local namecallHook
+namecallHook = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    if method == "FireServer" or method == "InvokeServer" then
+        local args = {...}
+        local cleanArgs = {}
+        for i = 1, math.min(3, #args) do
+            cleanArgs[i] = safeSerialize(args[i])
+        end
+        
+        local callingScript
+        pcall(function()
+            callingScript = getcallingscript()
+            callingScript = callingScript and callingScript.Name or "Unknown"
+        end)
+
+        callQueue[self] = {
+            count = (callQueue[self] and callQueue[self].count + 1) or 1,
+            args = cleanArgs,
+            script = callingScript
+        }
+    end
+    processQueue()
+    return namecallHook(self, ...)
+end))
 
 RemoteSpy.GetLogs = function() return remoteLogs end
 RemoteSpy.ClearLogs = function() table.clear(remoteLogs) end
