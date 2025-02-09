@@ -1,122 +1,112 @@
 local RemoteSpy = {}
-local Remote = import("objects/Remote")
+local MAX_LOG_SIZE = 100
+local THROTTLE_TIME = 0.1
+local lastCall = 0
 
-local requiredMethods = {
-    ["checkCaller"] = true,
-    ["newCClosure"] = true,
-    ["hookFunction"] = true,
-    ["isReadOnly"] = true,
-    ["setReadOnly"] = true,
-    ["getInfo"] = true,
-    ["getMetatable"] = true,
-    ["setClipboard"] = true,
-    ["getNamecallMethod"] = true,
-    ["getCallingScript"] = true,
-}
+ Simplified remote tracking with memory limits
+local remoteLogs = setmetatable({}, {
+    __mode = "k",
+    __index = function(t,k)
+        rawset(t,k,{
+            count = 0,
+            lastArgs = {},
+            lastScript = nil
+        })
+        return rawget(t,k)
+    end
+})
 
-local remoteMethods = {
-    FireServer = true,
-    InvokeServer = true,
-    Fire = true,
-    Invoke = true,
-    UnreliableFireServer = true
-}
+ Safe argument serialization
+local function safeSerialize(value)
+    local valueType = typeof(value)
+    if valueType == "userdata" then
+        return ("[%s:%s]"):format(valueType, tostring(value):gsub(" ",""))
+    elseif valueType == "table" then
+        return "{...}"
+    elseif valueType == "function" then
+        return "[function]"
+    end
+    return value
+end
 
-local remotesViewing = {
-    RemoteEvent = true,
-    UnreliableRemoteEvent = true,
-    RemoteFunction = false,
-    BindableEvent = false,
-    BindableFunction = false
-}
+ Throttled logging system
+local function logRemoteCall(remote, method, args, script)
+    local now = tick()
+    if now - lastCall < THROTTLE_TIME then return end
+    lastCall = now
 
-local methodHooks = {
-    RemoteEvent = Instance.new("RemoteEvent").FireServer,
-    UnreliableRemoteEvent = Instance.new("UnreliableRemoteEvent").UnreliableFireServer,
-    RemoteFunction = Instance.new("RemoteFunction").InvokeServer,
-    BindableEvent = Instance.new("BindableEvent").Fire,
-    BindableFunction = Instance.new("BindableFunction").Invoke
-}
+     Clean arguments
+    local cleanArgs = {}
+    for i = 1, math.min(5, #args) do  Limit to first 5 args
+        cleanArgs[i] = safeSerialize(args[i])
+    end
 
-local currentRemotes = setmetatable({}, {__mode = "v"})
-local remoteLogs = {}
-local maxLogs = 50
+     Update log entry
+    local entry = remoteLogs[remote]
+    entry.count = entry.count + 1
+    entry.lastArgs = cleanArgs
+    entry.lastScript = script and tostring(script) or "Unknown"
+end
 
-local remoteDataEvent = Instance.new("BindableEvent")
-local eventSet = false
+ Generic hook wrapper
+local function createSafeHook(original)
+    return function(...)
+        local success, result = pcall(function()
+            local self = ...
+            if self and self ~= game then
+                local method = getnamecallmethod() or "UnknownMethod"
+                local args = {...}
+                table.remove(args, 1)  Remove self from args
+                
+                 Get calling script safely
+                local callingScript
+                pcall(function()
+                    callingScript = getcallingscript()
+                    callingScript = callingScript and callingScript:GetFullName() or "UnknownScript"
+                end)
 
-local function connectEvent(callback)
-    remoteDataEvent.Event:Connect(callback)
-
-    if not eventSet then
-        eventSet = true
+                logRemoteCall(self, method, args, callingScript)
+            end
+            return original(...)
+        end)
+        
+        return success and result or nil
     end
 end
 
-local function safeHook(original, hook)
-    local success, hooked = pcall(function()
-        return hookFunction(original, hook)
-    end)
-    return success and hooked or original
-end
-
-local function handleRemoteCall(remote, method, callScript, ...)
-    local args = {...}
-    
-    local sanitizedArgs = {}
-    for i, v in pairs(args) do
-        sanitizedArgs[i] = typeof(v) == "userdata" and tostring(v) or v
-    end
-
-    if #remoteLogs >= maxLogs then
-        table.remove(remoteLogs, 1)
-    end
-
-    table.insert(remoteLogs, {
-        Remote = remote,
-        Method = method,
-        Args = sanitizedArgs,
-        Script = callScript,
-        Timestamp = os.time()
-    })
-end
-
+ Install hooks with fallbacks
 local function installHooks()
-    local remotes = {
+    local remoteTypes = {
         "RemoteEvent",
         "RemoteFunction",
         "UnreliableRemoteEvent"
     }
 
-    for _, className in ipairs(remotes) do
-        local instance = Instance.new(className)
-        local method = className == "RemoteFunction" and "InvokeServer" or "FireServer"
-        
-        local original
-        original = safeHook(instance[method], function(self, ...)
-            if self == instance then return original(self, ...) end
+    for _, className in pairs(remoteTypes) do
+        local success = pcall(function()
+            local instance = Instance.new(className)
+            local methodName = className == "RemoteFunction" and "InvokeServer" or "FireServer"
             
-            local callScript
-            pcall(function()
-                callScript = getCallingScript()
-                callScript = callScript and callScript:GetFullName() or "Unknown"
-            end)
-
-            handleRemoteCall(self, method, callScript, ...)
-            return original(self, ...)
+            local original
+            original = hookfunction(instance[methodName], createSafeHook(original))
         end)
+        
+        if not success then
+            warn("[RemoteSpy] Failed to hook", className)
+        end
     end
 end
 
-local success, err = pcall(installHooks)
-if not success then
-    warn("[RemoteSpy] Failed to install hooks:", err)
-end
+ Initialize with protection
+local initSuccess = pcall(function()
+    installHooks()
+    game.DescendantAdded:Connect(function(descendant)
+        if descendant:IsA("RemoteEvent") or descendant:IsA("RemoteFunction") then
+            pcall(installHooks)  Safe re-hook attempt
+        end
+    end)
+end)
 
-RemoteSpy.RemotesViewing = remotesViewing
-RemoteSpy.CurrentRemotes = currentRemotes
-RemoteSpy.ConnectEvent = connectEvent
-RemoteSpy.RequiredMethods = requiredMethods
 RemoteSpy.GetLogs = function() return remoteLogs end
 RemoteSpy.ClearLogs = function() table.clear(remoteLogs) end
 return RemoteSpy
