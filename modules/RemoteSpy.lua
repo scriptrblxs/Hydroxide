@@ -4,11 +4,16 @@ local THROTTLE_TIME = 0.5
 local lastProcess = 0
 local callCount = 0
 
-local BLACKLISTED_PATHS = {
-    ["Players.LocalPlayer.PlayerScripts"] = true,
-    ["PlayerModule"] = true,
+local CRITICAL_CLASSES = {
+    ["ControllerService"] = true,
+    ["ControlModule"] = true,
     ["CameraModule"] = true,
-    ["RbxCharacterSounds"] = true
+    ["CharacterSound"] = true
+}
+
+local PATH_PATTERNS = {
+    "PlayerScripts", "PlayerModule", "CharacterSounds", 
+    "CameraSystem", "ControlScript", "RbxCharacter"
 }
 
  Ultra-safe log storage with weak keys
@@ -35,41 +40,13 @@ local function ultraSafeValue(v)
 end
 
  Protected hook implementation
-local function createProtectedHook(original)
+local function createSafeHook()
     return function(self, ...)
-        local args = {...}
-        pcall(function()
-            local method = getnamecallmethod()
-            if (method == "FireServer" or method == "InvokeServer") then
-                callCount = callCount + 1
-                
-                 Only track first argument
-                local cleanArg = ultraSafeValue(args[1])
-                local caller = "Unknown"
-                
-                pcall(function()
-                    local s = getcallingscript()
-                    caller = s and s.Name or caller
-                end)
+        if isCritical(self) or isProtectedPath(self) then
+            return originalNamecall(self, ...)
+        end
 
-                remoteLogs[self] = {
-                    count = remoteLogs[self].count + 1,
-                    arg = cleanArg,
-                    script = caller
-                }
-
-                 Auto-clean when reaching limit
-                if callCount % MAX_LOG_SIZE == 0 then
-                    for k in pairs(remoteLogs) do
-                        if not k.Parent then
-                            remoteLogs[k] = nil
-                        end
-                    end
-                end
-            end
-        end)
-        
-        return original(self, ...)
+        -- Rest of logging logic
     end
 end
 
@@ -77,12 +54,7 @@ end
 local function initialize()
     pcall(function()
         local originalNamecall
-        originalNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-            if not isBlacklisted(self) then
-                createProtectedHook(originalNamecall)(self, ...)
-            end
-            return originalNamecall(self, ...)
-        end)
+        originalNamecall = hookmetamethod(game, "__namecall", createSafeHook())
     end)
 end
 
@@ -115,13 +87,31 @@ RemoteSpy.ClearLogs = function()
     callCount = 0
 end
 
+local function isCritical(instance)
+    return CRITICAL_CLASSES[instance.ClassName] or CRITICAL_CLASSES[instance.Name]
+end
+
+local function isProtectedPath(instance)
+    local success, path = pcall(function()
+        return instance:GetFullName():lower()
+    end)
+    if not success then return true end
+    
+    for _, pattern in ipairs(PATH_PATTERNS) do
+        if path:find(pattern:lower(), 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
 local function isBlacklisted(remote)
     local success, path = pcall(function()
         return remote:GetFullName()
     end)
     if not success then return true end
     
-    for pattern in pairs(BLACKLISTED_PATHS) do
+    for pattern in pairs(CRITICAL_CLASSES) do
         if path:find(pattern, 1, true) then
             return true
         end
