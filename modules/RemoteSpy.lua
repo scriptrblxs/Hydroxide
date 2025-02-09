@@ -1,135 +1,52 @@
 local RemoteSpy = {}
-local MAX_LOG_SIZE = 20
-local THROTTLE_TIME = 0.5
-local lastProcess = 0
-local callCount = 0
+local cache = {}
+local limit = 20
+local last = 0
 
-local CRITICAL_CLASSES = {
-    ["ControllerService"] = true,
-    ["ControlModule"] = true,
-    ["CameraModule"] = true,
-    ["CharacterSound"] = true
+local bad = {
+    ["ControlModule"]=true,
+    ["CameraModule"]=true,
+    ["CharacterSound"]=true,
+    ["ControllerService"]=true
 }
 
-local PATH_PATTERNS = {
-    "PlayerScripts", "PlayerModule", "CharacterSounds", 
-    "CameraSystem", "ControlScript", "RbxCharacter"
-}
-
-local remoteLogs = setmetatable({}, {__mode = "k"})
-local logMeta = {
-    __index = function(t, k)
-        return {count=0, arg="", script="Unknown"}
+local function safe(v)
+    if type(v)=="userdata" then
+        return ("<%s>"):format(tostring(v):match("%u%a+") or "obj")
     end
-}
-setmetatable(remoteLogs, logMeta)
-
-local function ultraSafeValue(v)
-    local success, result = pcall(function()
-        local t = typeof(v)
-        if t == "userdata" then
-            return ("<%s>"):format(tostring(v):match("%u%a+") or t)
-        end
-        return t == "table" and "{}"
-              or t == "function" and "func"
-              or tostring(v):sub(1, 25)
-    end)
-    return success and result or "?"
+    return type(v)=="table" and "{}" or type(v)=="function" and "func" or v
 end
 
-local function createSafeHook()
-    return function(self, ...)
-        if isCritical(self) or isProtectedPath(self) then
-            return originalNamecall(self, ...)
-        end
-
+local original
+original = hookmetamethod(game, "__namecall", function(s, ...)
+    if bad[s.ClassName] or bad[s.Name] then
+        return original(s, ...)
+    end
+    
+    local n = getnamecallmethod()
+    if n=="FireServer" or n=="InvokeServer" then
+        local a = {...}
+        local t = {
+            args = {},
+            time = os.time(),
+            method = n
+        }
         
-    end
-end
-
-local function initialize()
-    pcall(function()
-        local originalNamecall
-        originalNamecall = hookmetamethod(game, "__namecall", createSafeHook())
-    end)
-end
-
-local function safeProcess()
-    if tick() - lastProcess < THROTTLE_TIME then return end
-    lastProcess = tick()
-    
-    pcall(function()
-         Force GC cleanup periodically
-        if callCount % (MAX_LOG_SIZE * 2) == 0 then
-            collectgarbage()
+        for i=1,math.min(2,#a) do
+            t.args[i] = safe(a[i])
         end
-    end)
-end
-task.spawn(function()
-    while true do
-        safeProcess()
-        task.wait(THROTTLE_TIME)
+        
+        if #cache >= limit then
+            table.remove(cache,1)
+        end
+        
+        table.insert(cache,t)
     end
+    
+    return original(s, ...)
 end)
 
-initialize()
-
-RemoteSpy.GetLogs = function() return remoteLogs end
-RemoteSpy.ClearLogs = function()
-    table.clear(remoteLogs)
-    callCount = 0
-end
-
-local function isCritical(instance)
-    return CRITICAL_CLASSES[instance.ClassName] or CRITICAL_CLASSES[instance.Name]
-end
-
-local function isProtectedPath(instance)
-    local success, path = pcall(function()
-        return instance:GetFullName():lower()
-    end)
-    if not success then return true end
-    
-    for _, pattern in ipairs(PATH_PATTERNS) do
-        if path:find(pattern:lower(), 1, true) then
-            return true
-        end
-    end
-    return false
-end
-
-local function isBlacklisted(remote)
-    local success, path = pcall(function()
-        return remote:GetFullName()
-    end)
-    if not success then return true end
-    
-    for pattern in pairs(CRITICAL_CLASSES) do
-        if path:find(pattern, 1, true) then
-            return true
-        end
-    end
-    return false
-end
-
-local MEMORY_LIMITS = {
-    MAX_LOG_ENTRIES = 15,
-    MAX_ARG_LENGTH = 20,
-    GC_INTERVAL = 30
-}
-
-local function enforceMemorySafety()
-    collectgarbage()
-    if #remoteLogs > MEMORY_LIMITS.MAX_LOG_ENTRIES then
-        table.clear(remoteLogs)
-    end
-end
-
-task.spawn(function()
-    while true do
-        enforceMemorySafety()
-        task.wait(MEMORY_LIMITS.GC_INTERVAL)
-    end
-end)
+RemoteSpy.GetLogs = function() return cache end
+RemoteSpy.Clear = function() table.clear(cache) end
 
 return RemoteSpy
