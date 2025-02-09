@@ -1,81 +1,78 @@
 local RemoteSpy = {}
-local MAX_LOG_ENTRIES = 50
-local THROTTLE_DELAY = 0.2
-local lastProcess = 0
-local callQueue = {}
+local MAX_ENTRIES = 30
+local THROTTLE = 0.3
+local lastUpdate = tick()
+local callBuffer = {}
 
  Simplified log storage with FIFO structure
 local remoteLogs = {}
 local logMeta = {
     __index = function(t, k)
-        return rawget(t, k) or {count=0, args={}, script="Unknown"}
+        return {count=0, args={}, script="Unknown"}
     end
 }
 setmetatable(remoteLogs, logMeta)
 
- Safe value serialization with error handling
-local function safeSerialize(value)
-    local success, result = pcall(function()
-        local t = typeof(value)
-        if t == "userdata" then
-            return ("<%s:%s>"):format(t, tostring(value):sub(1, 20))
-        elseif t == "table" then
-            return "{...}"
-        elseif t == "function" then
-            return "func"
-        end
-        return tostring(value):sub(1, 50)
-    end)
-    return success and result or "[Serialization Error]"
+ Robust value sanitization
+local function safeValue(v)
+    local t = typeof(v)
+    if t == "userdata" then
+        return ("<%s>"):format(tostring(v):match("%w+$") or t)
+    end
+    return t == "table" and "{}" or t == "function" and "func" or v
 end
 
- Batch process queued calls
-local function processQueue()
-    if tick() - lastProcess < THROTTLE_DELAY then return end
-    lastProcess = tick()
+ Batch processing with throttling
+local function processBuffer()
+    if tick() - lastUpdate < THROTTLE then return end
     
-    for remote, data in pairs(callQueue) do
+    for remote, entry in pairs(callBuffer) do
         remoteLogs[remote] = {
-            count = remoteLogs[remote].count + data.count,
-            args = data.args,
-            script = data.script
+            count = remoteLogs[remote].count + entry.count,
+            args = entry.args,
+            script = entry.script
         }
-        callQueue[remote] = nil
+        callBuffer[remote] = nil
     end
     
      Maintain log size
-    while #remoteLogs > MAX_LOG_ENTRIES do
+    if #remoteLogs > MAX_ENTRIES then
         table.remove(remoteLogs, 1)
     end
+    lastUpdate = tick()
 end
 
- Namecall hook for all remote interactions
-local namecallHook
-namecallHook = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+ Single hook point using namecall
+local originalNamecall
+originalNamecall = hookmetamethod(game, "__namecall", function(self, ...)
     local method = getnamecallmethod()
     if method == "FireServer" or method == "InvokeServer" then
         local args = {...}
-        local cleanArgs = {}
-        for i = 1, math.min(3, #args) do
-            cleanArgs[i] = safeSerialize(args[i])
+        local clean = {}
+        for i = 1, math.min(2, #args) do   Only first 2 args
+            clean[i] = safeValue(args[i])
         end
         
-        local callingScript
+        local caller = "Unknown"
         pcall(function()
-            callingScript = getcallingscript()
-            callingScript = callingScript and callingScript.Name or "Unknown"
+            local s = getcallingscript()
+            caller = s and s.Name or caller
         end)
 
-        callQueue[self] = {
-            count = (callQueue[self] and callQueue[self].count + 1) or 1,
-            args = cleanArgs,
-            script = callingScript
+        callBuffer[self] = {
+            count = (callBuffer[self] and callBuffer[self].count + 1) or 1,
+            args = clean,
+            script = caller
         }
     end
-    processQueue()
-    return namecallHook(self, ...)
-end))
+    processBuffer()
+    return originalNamecall(self, ...)
+end)
 
 RemoteSpy.GetLogs = function() return remoteLogs end
-RemoteSpy.ClearLogs = function() table.clear(remoteLogs) end
+RemoteSpy.ClearLogs = function()
+    table.clear(remoteLogs)
+    table.clear(callBuffer)
+end
+
 return RemoteSpy
