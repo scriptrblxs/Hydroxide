@@ -18,11 +18,13 @@ local remoteMethods = {
     FireServer = true,
     InvokeServer = true,
     Fire = true,
-    Invoke = true
+    Invoke = true,
+    UnreliableFireServer = true
 }
 
 local remotesViewing = {
     RemoteEvent = true,
+    UnreliableRemoteEvent = true,
     RemoteFunction = false,
     BindableEvent = false,
     BindableFunction = false
@@ -30,12 +32,15 @@ local remotesViewing = {
 
 local methodHooks = {
     RemoteEvent = Instance.new("RemoteEvent").FireServer,
+    UnreliableRemoteEvent = Instance.new("UnreliableRemoteEvent").UnreliableFireServer,
     RemoteFunction = Instance.new("RemoteFunction").InvokeServer,
     BindableEvent = Instance.new("BindableEvent").Fire,
     BindableFunction = Instance.new("BindableFunction").Invoke
 }
 
-local currentRemotes = {}
+local currentRemotes = setmetatable({}, {__mode = "v"})
+local remoteLogs = {}
+local maxLogs = 50
 
 local remoteDataEvent = Instance.new("BindableEvent")
 local eventSet = false
@@ -48,113 +53,70 @@ local function connectEvent(callback)
     end
 end
 
-local nmcTrampoline
-nmcTrampoline = hookMetaMethod(game, "__namecall", function(...)
-    local instance = ...
-    
-    if typeof(instance) ~= "Instance" then
-        return nmcTrampoline(...)
-    end
-
-    local method = getNamecallMethod()
-
-    if method == "fireServer" then
-        method = "FireServer"
-    elseif method == "invokeServer" then
-        method = "InvokeServer"
-    end
-        
-    if remotesViewing[instance.ClassName] and instance ~= remoteDataEvent and remoteMethods[method] then
-        local remote = currentRemotes[instance]
-        local vargs = {select(2, ...)}
-            
-        if not remote then
-            remote = Remote.new(instance)
-            currentRemotes[instance] = remote
-        end
-
-        local remoteIgnored = remote.Ignored
-        local remoteBlocked = remote.Blocked
-        local argsIgnored = remote.AreArgsIgnored(remote, vargs)
-        local argsBlocked = remote.AreArgsBlocked(remote, vargs)
-
-        if eventSet and (not remoteIgnored and not argsIgnored) then
-            local call = {
-                script = getCallingScript((PROTOSMASHER_LOADED ~= nil and 2) or nil),
-                args = vargs,
-                func = getInfo(3).func
-            }
-
-            remote.IncrementCalls(remote, call)
-            remoteDataEvent.Fire(remoteDataEvent, instance, call)
-        end
-
-        if remoteBlocked or argsBlocked then
-            return
-        end
-    end
-
-    return nmcTrampoline(...)
-end)
-
--- vuln fix
-
-local pcall = pcall
-
-local function checkPermission(instance)
-    if (instance.ClassName) then end
+local function safeHook(original, hook)
+    local success, hooked = pcall(function()
+        return hookFunction(original, hook)
+    end)
+    return success and hooked or original
 end
 
-for _name, hook in pairs(methodHooks) do
-    local originalMethod
-    originalMethod = hookFunction(hook, newCClosure(function(...)
-        local instance = ...
-
-        if typeof(instance) ~= "Instance" then
-            return originalMethod(...)
-        end
-                
-        do
-            local success = pcall(checkPermission, instance)
-            if (not success) then return originalMethod(...) end
-        end
-
-        if instance.ClassName == _name and remotesViewing[instance.ClassName] and instance ~= remoteDataEvent then
-            local remote = currentRemotes[instance]
-            local vargs = {select(2, ...)}
-
-            if not remote then
-                remote = Remote.new(instance)
-                currentRemotes[instance] = remote
-            end
-
-            local remoteIgnored = remote.Ignored 
-            local argsIgnored = remote:AreArgsIgnored(vargs)
-            
-            if eventSet and (not remoteIgnored and not argsIgnored) then
-                local call = {
-                    script = getCallingScript((PROTOSMASHER_LOADED ~= nil and 2) or nil),
-                    args = vargs,
-                    func = getInfo(3).func
-                }
+local function handleRemoteCall(remote, method, callScript, ...)
+    local args = {...}
     
-                remote:IncrementCalls(call)
-                remoteDataEvent:Fire(instance, call)
-            end
+    local sanitizedArgs = {}
+    for i, v in pairs(args) do
+        sanitizedArgs[i] = typeof(v) == "userdata" and tostring(v) or v
+    end
 
-            if remote.Blocked or remote:AreArgsBlocked(vargs) then
-                return
-            end
-        end
+    if #remoteLogs >= maxLogs then
+        table.remove(remoteLogs, 1)
+    end
+
+    table.insert(remoteLogs, {
+        Remote = remote,
+        Method = method,
+        Args = sanitizedArgs,
+        Script = callScript,
+        Timestamp = os.time()
+    })
+end
+
+local function installHooks()
+    local remotes = {
+        "RemoteEvent",
+        "RemoteFunction",
+        "UnreliableRemoteEvent"
+    }
+
+    for _, className in ipairs(remotes) do
+        local instance = Instance.new(className)
+        local method = className == "RemoteFunction" and "InvokeServer" or "FireServer"
         
-        return originalMethod(...)
-    end))
+        local original
+        original = safeHook(instance[method], function(self, ...)
+            if self == instance then return original(self, ...) end
+            
+            local callScript
+            pcall(function()
+                callScript = getCallingScript()
+                callScript = callScript and callScript:GetFullName() or "Unknown"
+            end)
 
-    oh.Hooks[originalMethod] = hook
+            handleRemoteCall(self, method, callScript, ...)
+            return original(self, ...)
+        end)
+    end
+end
+
+local success, err = pcall(installHooks)
+if not success then
+    warn("[RemoteSpy] Failed to install hooks:", err)
 end
 
 RemoteSpy.RemotesViewing = remotesViewing
 RemoteSpy.CurrentRemotes = currentRemotes
 RemoteSpy.ConnectEvent = connectEvent
 RemoteSpy.RequiredMethods = requiredMethods
+RemoteSpy.GetLogs = function() return remoteLogs end
+RemoteSpy.ClearLogs = function() table.clear(remoteLogs) end
 return RemoteSpy
