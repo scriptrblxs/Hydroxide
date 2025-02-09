@@ -16,7 +16,6 @@ local PATH_PATTERNS = {
     "CameraSystem", "ControlScript", "RbxCharacter"
 }
 
- Ultra-safe log storage with weak keys
 local remoteLogs = setmetatable({}, {__mode = "k"})
 local logMeta = {
     __index = function(t, k)
@@ -25,7 +24,6 @@ local logMeta = {
 }
 setmetatable(remoteLogs, logMeta)
 
- Bulletproof value sanitization
 local function ultraSafeValue(v)
     local success, result = pcall(function()
         local t = typeof(v)
@@ -39,7 +37,6 @@ local function ultraSafeValue(v)
     return success and result or "?"
 end
 
- Protected hook implementation
 local function createSafeHook()
     return function(self, ...)
         if isCritical(self) or isProtectedPath(self) then
@@ -50,7 +47,6 @@ local function createSafeHook()
     end
 end
 
- Safe initialization
 local function initialize()
     pcall(function()
         local originalNamecall
@@ -58,7 +54,6 @@ local function initialize()
     end)
 end
 
- Throttled processing
 local function safeProcess()
     if tick() - lastProcess < THROTTLE_TIME then return end
     lastProcess = tick()
@@ -70,8 +65,6 @@ local function safeProcess()
         end
     end)
 end
-
- Start protected processing loop
 task.spawn(function()
     while true do
         safeProcess()
