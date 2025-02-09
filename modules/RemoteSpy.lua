@@ -55,7 +55,7 @@ local function webImport(file)
     return result
 end
 
- Add this before initializing any hooks
+
 local function waitForCharacter()
     local player = game:GetService("Players").LocalPlayer
     repeat task.wait() until player.Character
@@ -66,13 +66,13 @@ local function safeInitialize()
     local character = waitForCharacter()
     local humanoid = character:WaitForChild("Humanoid")
     
-     Disable hooks if critical components are missing
+    
     if not humanoid or not character:FindFirstChild("HumanoidRootPart") then
         warn("Hydroxide: Missing critical character components")
         return false
     end
     
-     Initialize modules only after character is valid
+    
     require(script.modules.RemoteSpy)
     return true
 end
