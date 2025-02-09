@@ -1,106 +1,105 @@
-local RemoteSpy = {}
-local MAX_LOG_SIZE = 20
-local THROTTLE_TIME = 0.5
-local lastProcess = 0
-local callCount = 0
+local owner = "24rr"
+local branch = "revision"
 
- Ultra-safe log storage with weak keys
-local remoteLogs = setmetatable({}, {__mode = "k"})
-local logMeta = {
-    __index = function(t, k)
-        return {count=0, arg="", script="Unknown"}
-    end
-}
-setmetatable(remoteLogs, logMeta)
-
- Bulletproof value sanitization
-local function ultraSafeValue(v)
-    local success, result = pcall(function()
-        local t = typeof(v)
-        if t == "userdata" then
-            return ("<%s>"):format(tostring(v):match("%u%a+") or t)
-        end
-        return t == "table" and "{}"
-              or t == "function" and "func"
-              or tostring(v):sub(1, 25)
-    end)
-    return success and result or "?"
-end
-
- Protected hook implementation
-local function createProtectedHook(original)
-    return function(self, ...)
-        local args = {...}
-        pcall(function()
-            local method = getnamecallmethod()
-            if (method == "FireServer" or method == "InvokeServer") then
-                callCount = callCount + 1
-                
-                 Only track first argument
-                local cleanArg = ultraSafeValue(args[1])
-                local caller = "Unknown"
-                
-                pcall(function()
-                    local s = getcallingscript()
-                    caller = s and s.Name or caller
-                end)
-
-                remoteLogs[self] = {
-                    count = remoteLogs[self].count + 1,
-                    arg = cleanArg,
-                    script = caller
-                }
-
-                 Auto-clean when reaching limit
-                if callCount % MAX_LOG_SIZE == 0 then
-                    for k in pairs(remoteLogs) do
-                        if not k.Parent then
-                            remoteLogs[k] = nil
-                        end
-                    end
-                end
-            end
-        end)
-        
-        return original(self, ...)
-    end
-end
-
- Safe initialization
-local function initialize()
-    pcall(function()
-        local originalNamecall
-        originalNamecall = hookmetamethod(game, "__namecall", createProtectedHook(originalNamecall))
-    end)
-end
-
- Throttled processing
-local function safeProcess()
-    if tick() - lastProcess < THROTTLE_TIME then return end
-    lastProcess = tick()
+ Enhanced environment validation with additional fallbacks
+local function validateEnvironment()
+     Core function safety net
+    local env = getgenv()
     
-    pcall(function()
-         Force GC cleanup periodically
-        if callCount % (MAX_LOG_SIZE * 2) == 0 then
-            collectgarbage()
-        end
-    end)
-end
-
- Start protected processing loop
-task.spawn(function()
-    while true do
-        safeProcess()
-        task.wait(THROTTLE_TIME)
+     Essential function fallbacks
+    if not env.getscriptclosure and not env.get_script_function then
+        env.getscriptclosure = function() return nil end
     end
-end)
+    
+    if not env.isXClosure then
+        env.isXClosure = function() return false end
+    end
 
-initialize()
+     Improved closure detection fallback
+    if not env.isLClosure then
+        env.isLClosure = function(f)
+            return type(f) == "function" and not env.isXClosure(f)
+        end
+    end
 
-RemoteSpy.GetLogs = function() return remoteLogs end
-RemoteSpy.ClearLogs = function()
-    table.clear(remoteLogs)
-    callCount = 0
+     GC fallback for executors without proper GC access
+    if not env.getGc then
+        env.getGc = function()
+            return setmetatable({}, {
+                __pairs = function() return next, {} end
+            })
+        end
+    end
+
+     Web request fallback for executors without async support
+    if not game.HttpGetAsync then
+        game.HttpGetAsync = function(self, url)
+            return game:HttpGet(url)
+        end
+    end
 end
 
-return RemoteSpy
+validateEnvironment()
+
+local function webImport(file)
+    local success, result = pcall(function()
+        local url = ("https://raw.githubusercontent.com/%s/Hydroxide/%s/%s.lua"):format(owner, branch, file)
+        local content = game:HttpGetAsync(url)
+        return loadstring(content, file .. '.lua')()
+    end)
+    
+    if not success then
+        warn("[Hydroxide] Failed to load", file, ":", result)
+        return function() end
+    end
+    return result
+end
+
+ Add this before initializing any hooks
+local function waitForCharacter()
+    local player = game:GetService("Players").LocalPlayer
+    repeat task.wait() until player.Character
+    return player.Character
+end
+
+local function safeInitialize()
+    local character = waitForCharacter()
+    local humanoid = character:WaitForChild("Humanoid")
+    
+     Disable hooks if critical components are missing
+    if not humanoid or not character:FindFirstChild("HumanoidRootPart") then
+        warn("Hydroxide: Missing critical character components")
+        return false
+    end
+    
+     Initialize modules only after character is valid
+    require(script.modules.RemoteSpy)
+    return true
+end
+
+pcall(safeInitialize)
+
+ Safer initialization with error suppression
+local function initialize()
+    local success = pcall(function()
+        webImport("init")
+        webImport("ui/main")
+    end)
+    
+    if not success and not iswindowactive then
+         Fallback UI warning for headless environments
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "Hydroxide Warning",
+            Text = "Failed to initialize UI components",
+            Duration = 10
+        })
+    end
+end
+
+ Protected execution with multiple fallbacks
+for _ = 1, 3 do   Retry mechanism
+    local success, err = pcall(initialize)
+    if success then break end
+    warn("[Hydroxide] Initialization attempt failed:", err)
+    task.wait(1)
+end 
