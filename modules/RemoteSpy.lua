@@ -46,7 +46,7 @@ local function createSafeHook()
             return originalNamecall(self, ...)
         end
 
-        -- Rest of logging logic
+        
     end
 end
 
@@ -118,5 +118,25 @@ local function isBlacklisted(remote)
     end
     return false
 end
+
+local MEMORY_LIMITS = {
+    MAX_LOG_ENTRIES = 15,
+    MAX_ARG_LENGTH = 20,
+    GC_INTERVAL = 30
+}
+
+local function enforceMemorySafety()
+    collectgarbage()
+    if #remoteLogs > MEMORY_LIMITS.MAX_LOG_ENTRIES then
+        table.clear(remoteLogs)
+    end
+end
+
+task.spawn(function()
+    while true do
+        enforceMemorySafety()
+        task.wait(MEMORY_LIMITS.GC_INTERVAL)
+    end
+end)
 
 return RemoteSpy
