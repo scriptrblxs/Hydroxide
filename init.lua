@@ -5,7 +5,7 @@ if oh then
 end
 
 local web = true
-local user = "24rr" -- change if you're using a fork
+local user = "scriptrblxs" -- change if you're using a fork
 local branch = "revision"
 local importCache = {}
 
