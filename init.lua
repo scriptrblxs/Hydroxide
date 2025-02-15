@@ -1,5 +1,5 @@
 local environment = assert(getgenv, "<OH> ~ Your exploit is not supported")()
-local DO_DEBUG = environment.DO_DEBUG or
+local DO_DEBUG = environment.DO_DEBUG or false
 
 if oh then
     oh.Exit()
@@ -11,7 +11,7 @@ local branch = "revision"
 local importCache = {}
 
 local function hasMethods(methods)
-    
+    if DO_DEBUG then print(debug.info(1, "s")) end
     for name in pairs(methods) do
         if not environment[name] then
             return false
